@@ -26,15 +26,22 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests
 
-      - name: Run Scraper
+      - name: Run ESI Directory Scraper
         run: |
           python scraper.py
 
-      - name: Commit and Push Updated Directory Files
+      - name: Upload Dataset Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: esi-directory-dataset
+          path: |
+            esi_master.csv
+            esi_master.json
+
+      - name: Commit and Push to Repository
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git add -f esi_master.json esi_master.csv
-          git commit -m "chore(data): sync master ESI directory [skip ci]" || echo "No changes to commit"
-          git push origin main
+          git diff --quiet && git diff --staged --quiet || (git commit -m "chore(data): auto-update verified ESI clinical directory [skip ci]" && git push)
           
