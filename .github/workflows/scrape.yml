@@ -1,33 +1,33 @@
-name: Run ESI Scraper
+name: Scraper
 
 on:
   workflow_dispatch:
 
 jobs:
-  scrape:
+  run-scraper:
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: setup-python@v5
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: '3.11'
 
-      - name: Install dependencies
+      - name: Install
         run: pip install requests beautifulsoup4 pandas lxml
 
-      - name: Execute Scraper
+      - name: Run
         run: python scraper.py
 
-      - name: Commit and push datasets
+      - name: Save Data
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "bot"
+          git config user.email "bot@github.com"
           git add -A
-          git commit -m "Add master ESI directory" || echo "No changes"
+          git commit -m "Update master ESI directory" || exit 0
           git push
-
+          
