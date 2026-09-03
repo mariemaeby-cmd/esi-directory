@@ -1,34 +1,49 @@
+import csv
 import json
 import re
 import time
 from typing import Dict, List, Optional, Tuple
 import requests
-from bs4 import BeautifulSoup
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.5",
-    "Connection": "keep-alive",
-}
+OVERPASS_URL = "https://overpass-api.de/api/interpreter"
 
-# Positive patterns matching authorized clinical care facilities
+# Explicit Overpass query across the entire India bounding geometry
+# Pulls healthcare nodes, ways, and relations referencing ESI/ESIS facilities
+OVERPASS_QUERY = """
+[out:json][timeout:180];
+area["ISO3166-1"="IN"][admin_level=2]->.india;
+(
+  node["amenity"~"hospital|clinic|doctors"](area.india)[~"name"~"ESI|ESIC|ESIS|Dispensary|DCBO",i];
+  way["amenity"~"hospital|clinic|doctors"](area.india)[~"name"~"ESI|ESIC|ESIS|Dispensary|DCBO",i];
+  relation["amenity"~"hospital|clinic|doctors"](area.india)[~"name"~"ESI|ESIC|ESIS|Dispensary|DCBO",i];
+
+  node["healthcare"](area.india)[~"name"~"ESI|ESIC|ESIS|Dispensary|DCBO",i];
+  way["healthcare"](area.india)[~"name"~"ESI|ESIC|ESIS|Dispensary|DCBO",i];
+  relation["healthcare"](area.india)[~"name"~"ESI|ESIC|ESIS|Dispensary|DCBO",i];
+
+  node["building"~"hospital"](area.india)[~"name"~"ESI|ESIC|ESIS|Dispensary|DCBO",i];
+  way["building"~"hospital"](area.india)[~"name"~"ESI|ESIC|ESIS|Dispensary|DCBO",i];
+);
+out center tags;
+"""
+
+# Positive inclusion patterns for clinical care facilities
 CLINICAL_PATTERNS = [
-    r"\b(esic?|esis)\b.*?\b(hospital|model hospital|super\s*speciality|ss\s*hospital|medical college|pgimsr|dental college)\b",
+    r"\b(esic?|esis)\b.*?\b(hospital|model hospital|super\s*speciality|ss\s*hospital|medical college|pgimsr|dental college|ayush)\b",
     r"\b(medical college|pgimsr|dental college|nursing college)\b",
     r"\b(esic?|esis)\b.*?\b(dispensary|clinic|health\s*centre|mhu|mobile\s*dispensary)\b",
-    r"\b(esi[sc]?)\s*(dispensary|hospital)\b",
+    r"\b(esi[sc]?)\s*(dispensary|hospital|clinic)\b",
     r"\b(dcbo|d\.c\.b\.o)\b",
     r"\bdispensary[\s\-]*(?:cum[\s\-]*branch\s*office|cbo)\b",
 ]
 
-# Strict exclusions: Drop residential, administrative, judicial, and financial offices
+# Strict exclusion patterns for administrative, financial, judicial, and residential establishments
 EXCLUSION_PATTERNS = [
-    r"\b(quarters?|qtrs?|residential|colony|staff\s*quarters?|hostel|mess)\b",
-    r"\b(headquarters?|h\.?q\.?|regional\s*office|sub[\s\-]*regional\s*office|sro|divisional\s*office|branch\s*office\b(?!.*(?:dispensary|dcbo|cum))|bo\b|directorate)\b",
-    r"\b(cash\s*branch|revenue\s*branch|accounts|audit|recovery\s*cell|recovery\s*office)\b",
-    r"\b(court|tribunal|inspection|vigilance)\b",
-    r"\b(guest\s*house|holiday\s*home|transit\s*camp|depot|engineering|cell)\b",
+    r"\b(quarters?|qtrs?|residential\s*complex|staff\s*quarters?|colony|officers?\s*mess|hostel)\b",
+    r"\b(headquarters?|h\.?q\.?|regional\s*office|sub[\s\-]*regional\s*office|sro|division(?:al)?\s*office|branch\s*office\b(?!.*(?:dispensary|dcbo|cum))|bo\b|directorate)\b",
+    r"\b(cash\s*branch|revenue\s*branch|accounts\s*branch|audit\s*branch|recovery\s*office|recovery\s*cell)\b",
+    r"\b(esi\s*court|labour\s*court|tribunal|inspection\s*wing|vigilance\s*wing)\b",
+    r"\b(guest\s*house|holiday\s*home|transit\s*camp|store\s*depot|engineering\s*wing|pmo\s*cell)\b",
 ]
 
 COMPILED_CLINICAL = [re.compile(p, re.IGNORECASE) for p in CLINICAL_PATTERNS]
@@ -38,16 +53,16 @@ COMPILED_EXCLUSIONS = [re.compile(p, re.IGNORECASE) for p in EXCLUSION_PATTERNS]
 def evaluate_and_clean_facility(name: str) -> Tuple[Optional[str], str]:
     clean_name = re.sub(r"\s+", " ", name).strip()
 
-    # 1. Reject administrative/residential keywords
+    # 1. Reject non-clinical / residential / administrative establishments
     for exclusion in COMPILED_EXCLUSIONS:
         if exclusion.search(clean_name):
             return None, clean_name
 
-    # 2. Check clinical pattern match
+    # 2. Must match positive clinical criteria
     if not any(pattern.search(clean_name) for pattern in COMPILED_CLINICAL):
         return None, clean_name
 
-    # 3. Standardize and expand DCBO acronyms
+    # 3. Standardize & expand DCBO acronyms
     clean_name = re.sub(
         r"\b(dcbo|d\.c\.b\.o)\b",
         "Dispensary-cum-Branch Office (DCBO)",
@@ -55,7 +70,7 @@ def evaluate_and_clean_facility(name: str) -> Tuple[Optional[str], str]:
         flags=re.IGNORECASE,
     )
 
-    # 4. Assign tier classification
+    # 4. Categorize clinical facility tier
     name_lower = clean_name.lower()
     if any(k in name_lower for k in ["medical college", "pgimsr", "dental college"]):
         category = "Tier 1: ESIC Medical College / PGIMSR"
@@ -73,158 +88,97 @@ def evaluate_and_clean_facility(name: str) -> Tuple[Optional[str], str]:
     return category, clean_name
 
 
-def clean_text(text: Optional[str]) -> str:
-    if not text:
-        return ""
-    return re.sub(r"\s+", " ", text).strip()
+def scrape_and_build_dataset():
+    print("Executing comprehensive spatial query across India...")
+    headers = {"User-Agent": "ESI-Clinical-Directory-Scraper/2.0"}
 
+    # Retry loop with backoff to handle Overpass API timeouts cleanly
+    elements = []
+    for attempt in range(3):
+        try:
+            resp = requests.post(OVERPASS_URL, data={"data": OVERPASS_QUERY}, headers=headers, timeout=120)
+            if resp.status_code == 200:
+                elements = resp.json().get("elements", [])
+                print(f"Retrieved {len(elements)} raw healthcare nodes/ways from OSM.")
+                break
+            else:
+                print(f"Attempt {attempt + 1}: Received HTTP {resp.status_code}. Retrying in 10s...")
+                time.sleep(10)
+        except Exception as e:
+            print(f"Attempt {attempt + 1} failed: {e}. Retrying in 10s...")
+            time.sleep(10)
 
-def scrape_all_esi_facilities() -> List[Dict]:
-    session = requests.Session()
-    session.headers.update(HEADERS)
-    facilities_dict: Dict[str, Dict] = {}
+    verified_facilities: Dict[str, Dict] = {}
     dropped_count = 0
 
-    # Source endpoints across ESIC portal
-    ENDPOINTS = [
-        {"url": "https://www.esic.gov.in/hospitals", "type": "hospital"},
-        {"url": "https://www.esic.gov.in/medical-colleges-institutions", "type": "medical_college"},
-        {"url": "https://www.esic.gov.in/dispensaries", "type": "dispensary"},
-        {"url": "https://www.esic.gov.in/dcbo", "type": "dcbo"},
-        {"url": "https://www.esic.gov.in/ayush", "type": "hospital"},
-    ]
+    for el in elements:
+        tags = el.get("tags", {})
+        raw_name = tags.get("name") or tags.get("name:en") or tags.get("official_name")
+        if not raw_name:
+            continue
 
-    for ep in ENDPOINTS:
-        url = ep["url"]
-        print(f"Scraping endpoint: {url} ...")
-        try:
-            resp = session.get(url, timeout=25)
-            if resp.status_code != 200:
-                print(f"  [!] HTTP {resp.status_code} received from {url}")
-                continue
+        category, clean_name = evaluate_and_clean_facility(raw_name)
+        if category is None:
+            dropped_count += 1
+            continue
 
-            soup = BeautifulSoup(resp.text, "html.parser")
-            tables = soup.find_all("table")
+        lat = el.get("lat") or el.get("center", {}).get("lat")
+        lon = el.get("lon") or el.get("center", {}).get("lon")
+        osm_id = str(el.get("id"))
 
-            for table in tables:
-                rows = table.find_all("tr")
-                for row in rows[1:]:  # skip header row
-                    cols = [clean_text(td.get_text()) for td in row.find_all("td")]
-                    if len(cols) < 2:
-                        continue
+        addr_parts = [
+            tags.get("addr:street"),
+            tags.get("addr:suburb"),
+            tags.get("addr:city") or tags.get("addr:district"),
+            tags.get("addr:state"),
+            tags.get("addr:postcode"),
+        ]
+        address = ", ".join([p for p in addr_parts if p]) or tags.get("addr:full", "")
 
-                    raw_name = ""
-                    address = ""
-                    phone = ""
-                    state = ""
+        pincode = tags.get("addr:postcode", "")
+        if not pincode:
+            pin_search = re.search(r"\b([1-9][0-9]{5})\b", address + " " + clean_name)
+            pincode = pin_search.group(1) if pin_search else ""
 
-                    # Dynamic column matching based on table shape
-                    if len(cols) >= 4:
-                        state = cols[1] if len(cols[1]) < 30 else ""
-                        raw_name = cols[2] if len(cols[2]) > 3 else cols[1]
-                        address = cols[3] if len(cols) > 3 else ""
-                        phone = cols[4] if len(cols) > 4 else ""
-                    elif len(cols) == 3:
-                        raw_name = cols[1]
-                        address = cols[2]
-                    else:
-                        raw_name = cols[0]
-                        address = cols[1]
+        phone = tags.get("phone") or tags.get("contact:phone", "")
 
-                    category, clean_name = evaluate_and_clean_facility(raw_name)
+        # Deduplication key based on normalized name and state/city
+        dedup_key = re.sub(r"[^a-zA-Z0-9]", "", clean_name.lower())
 
-                    if category is None:
-                        dropped_count += 1
-                        continue
+        if dedup_key not in verified_facilities:
+            verified_facilities[dedup_key] = {
+                "id": f"osm_{osm_id}",
+                "name": clean_name,
+                "category": category,
+                "address": address,
+                "pincode": pincode,
+                "latitude": lat,
+                "longitude": lon,
+                "phone": phone,
+                "maps_url": f"https://www.google.com/maps/search/?api=1&query={lat},{lon}" if lat and lon else "",
+            }
 
-                    # Extract standard 6-digit PIN code
-                    pin_match = re.search(r"\b([1-9][0-9]{5})\b", address + " " + clean_name)
-                    pincode = pin_match.group(1) if pin_match else ""
+    results = list(verified_facilities.values())
 
-                    # Clean phone numbers
-                    phone_match = re.search(r"(\+?\d[\d\s\-]{7,14}\d)", phone)
-                    clean_phone = phone_match.group(1).replace(" ", "") if phone_match else ""
+    # 1. Output JSON
+    with open("esi_master.json", "w", encoding="utf-8") as f_json:
+        json.dump(results, f_json, indent=2, ensure_ascii=False)
 
-                    # Deduplication key
-                    unique_key = re.sub(r"[^a-zA-Z0-9]", "", (clean_name + pincode).lower())
+    # 2. Output CSV
+    if results:
+        fieldnames = ["id", "name", "category", "address", "pincode", "latitude", "longitude", "phone", "maps_url"]
+        with open("esi_master.csv", "w", newline="", encoding="utf-8") as f_csv:
+            writer = csv.DictWriter(f_csv, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(results)
 
-                    if unique_key and unique_key not in facilities_dict:
-                        full_address = f"{address}, {state}".strip(", ")
-                        facilities_dict[unique_key] = {
-                            "name": clean_name,
-                            "category": category,
-                            "address": full_address,
-                            "pincode": pincode,
-                            "phone": clean_phone,
-                            "maps_url": f"https://www.google.com/maps/search/?api=1&query={requests.utils.quote(clean_name + ' ' + full_address)}",
-                            "source": "esic_portal_scraped",
-                        }
-
-            time.sleep(1)
-
-        except Exception as e:
-            print(f"  [X] Failed scraping {url}: {e}")
-
-    # Fallback / Overpass augmentation if government portals throttle
-    if len(facilities_dict) < 50:
-        print("Government portal throttled/blocked. Pulling complete geospatial nodes...")
-        try:
-            overpass_url = "https://overpass-api.de/api/interpreter"
-            query = """
-            [out:json][timeout:60];
-            area["ISO3166-1"="IN"][admin_level=2]->.india;
-            (
-              node["amenity"~"hospital|clinic|doctors"](area.india)[~"name"~"ESI|ESIC|ESIS|Dispensary",i];
-              way["amenity"~"hospital|clinic|doctors"](area.india)[~"name"~"ESI|ESIC|ESIS|Dispensary",i];
-            );
-            out center tags;
-            """
-            r = session.post(overpass_url, data={"data": query}, timeout=90)
-            if r.status_code == 200:
-                nodes = r.json().get("elements", [])
-                for node in nodes:
-                    tags = node.get("tags", {})
-                    name = tags.get("name") or tags.get("name:en")
-                    if not name:
-                        continue
-                    cat, c_name = evaluate_and_clean_facility(name)
-                    if not cat:
-                        dropped_count += 1
-                        continue
-
-                    lat = node.get("lat") or node.get("center", {}).get("lat")
-                    lon = node.get("lon") or node.get("center", {}).get("lon")
-                    addr = tags.get("addr:full") or tags.get("addr:street") or "India"
-
-                    k = re.sub(r"[^a-zA-Z0-9]", "", c_name.lower())
-                    if k not in facilities_dict:
-                        facilities_dict[k] = {
-                            "name": c_name,
-                            "category": cat,
-                            "address": addr,
-                            "latitude": lat,
-                            "longitude": lon,
-                            "pincode": tags.get("addr:postcode", ""),
-                            "phone": tags.get("phone", ""),
-                            "maps_url": f"https://www.google.com/maps/search/?api=1&query={lat},{lon}" if lat and lon else "",
-                            "source": "geospatial_augmented",
-                        }
-        except Exception as err:
-            print(f"Augmentation error: {err}")
-
-    results = list(facilities_dict.values())
-    output_file = "esi_master.json"
-
-    with open(output_file, "w", encoding="utf-8") as f:
-        json.dump(results, f, indent=2, ensure_ascii=False)
-
-    print(f"\nProcessing Complete:")
-    print(f"  • Excluded non-clinical (offices/quarters): {dropped_count}")
-    print(f"  • Verified clinical institutions saved: {len(results)}")
-    print(f"  • Written to: {output_file}")
-    return results
+    print(f"\nProcessing Summary:")
+    print(f"  • Non-clinical (quarters/admin offices) excluded: {dropped_count}")
+    print(f"  • Verified clinical establishments saved: {len(results)}")
+    print(f"  • Files updated: esi_master.json, esi_master.csv")
 
 
 if __name__ == "__main__":
-    scrape_all_esi_facilities()
+    scrape_and_build_dataset()
+    
                     
