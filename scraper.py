@@ -1,48 +1,25 @@
-cat << 'EOF' > scraper.py
 import json
-import os
 import re
 import time
 from typing import Optional, Tuple
 import requests
 
-API_KEY = os.environ.get("GOOGLE_MAPS_API_KEY", "YOUR_API_KEY_HERE")
-PLACES_URL = "https://places.googleapis.com/v1/places:searchText"
+OVERPASS_URL = "https://overpass-api.de/api/interpreter"
 
-SEARCH_QUERIES = [
-    "ESIC Hospital",
-    "ESIS Hospital",
-    "ESIC Medical College PGIMSR",
-    "ESI Dispensary",
-    "ESIS Dispensary",
-    "ESIC DCBO",
-    "ESI Dispensary cum Branch Office",
-]
-
-REGION_ANCHORS = [
-    {"name": "North (NCR/PB/HR/RJ)", "lat": 28.6139, "lng": 77.2090, "radius": 450000.0},
-    {"name": "West (MH/GJ/GA)", "lat": 19.0760, "lng": 72.8777, "radius": 450000.0},
-    {"name": "South-1 (KA/TN/KL)", "lat": 12.9716, "lng": 77.5946, "radius": 450000.0},
-    {"name": "South-2 (AP/TS)", "lat": 17.3850, "lng": 78.4867, "radius": 350000.0},
-    {"name": "East (WB/OD/JH/BR)", "lat": 22.5726, "lng": 88.3639, "radius": 450000.0},
-    {"name": "Central (MP/CG/UP)", "lat": 23.2599, "lng": 77.4126, "radius": 450000.0},
-    {"name": "North-East (AS/TR/ML)", "lat": 26.1445, "lng": 91.7362, "radius": 350000.0},
-]
-
-HEADERS = {
-    "Content-Type": "application/json",
-    "X-Goog-Api-Key": API_KEY,
-    "X-Goog-FieldMask": (
-        "places.id,"
-        "places.displayName,"
-        "places.formattedAddress,"
-        "places.location,"
-        "places.nationalPhoneNumber,"
-        "places.internationalPhoneNumber,"
-        "places.types,"
-        "places.googleMapsUri"
-    ),
-}
+# Overpass QL query targeting all ESI/ESIS healthcare infrastructure across India
+QUERY = """
+[out:json][timeout:90];
+area["ISO3166-1"="IN"][admin_level=2]->.india;
+(
+  node["amenity"~"hospital|clinic|doctors"](area.india)[~"name"~"ESI|ESIC|ESIS|Dispensary|DCBO",i];
+  way["amenity"~"hospital|clinic|doctors"](area.india)[~"name"~"ESI|ESIC|ESIS|Dispensary|DCBO",i];
+  relation["amenity"~"hospital|clinic|doctors"](area.india)[~"name"~"ESI|ESIC|ESIS|Dispensary|DCBO",i];
+  
+  node["healthcare"](area.india)[~"name"~"ESI|ESIC|ESIS|Dispensary|DCBO",i];
+  way["healthcare"](area.india)[~"name"~"ESI|ESIC|ESIS|Dispensary|DCBO",i];
+);
+out center tags;
+"""
 
 CLINICAL_PATTERNS = [
     r"\b(esic?|esis)\b.*?\b(hospital|model hospital|super\s*speciality\s*hospital|ss\s*hospital)\b",
@@ -97,73 +74,65 @@ def evaluate_and_clean_facility(name: str) -> Tuple[Optional[str], str]:
 
     return category, clean_name
 
-def run_extraction():
-    if not API_KEY or API_KEY == "YOUR_API_KEY_HERE":
-        print("[!] ERROR: Set GOOGLE_MAPS_API_KEY before running.")
+def run_osm_extraction():
+    print("Querying OpenStreetMap Overpass API for all ESI facilities across India (no key required)...")
+    try:
+        response = requests.post(OVERPASS_URL, data={"data": QUERY}, timeout=120)
+        response.raise_for_status()
+        elements = response.json().get("elements", [])
+    except Exception as e:
+        print(f"Extraction error: {e}")
         return
 
     verified_facilities = {}
-    dropped_entries = 0
+    dropped_count = 0
 
-    for anchor in REGION_ANCHORS:
-        print(f"Scanning region: {anchor['name']}...")
-        for query in SEARCH_QUERIES:
-            payload = {
-                "textQuery": query,
-                "locationBias": {
-                    "circle": {
-                        "center": {"latitude": anchor["lat"], "longitude": anchor["lng"]},
-                        "radius": anchor["radius"],
-                    }
-                },
-                "maxResultCount": 20,
-            }
+    for el in elements:
+        tags = el.get("tags", {})
+        raw_name = tags.get("name") or tags.get("name:en")
+        if not raw_name:
+            continue
 
-            try:
-                response = requests.post(PLACES_URL, headers=HEADERS, json=payload, timeout=10)
-                if response.status_code != 200:
-                    continue
+        category, clean_name = evaluate_and_clean_facility(raw_name)
+        if category is None:
+            dropped_count += 1
+            continue
 
-                places = response.json().get("places", [])
-                for place in places:
-                    place_id = place.get("id")
-                    if not place_id or place_id in verified_facilities:
-                        continue
+        lat = el.get("lat") or el.get("center", {}).get("lat")
+        lon = el.get("lon") or el.get("center", {}).get("lon")
+        osm_id = str(el.get("id"))
 
-                    raw_name = place.get("displayName", {}).get("text", "")
-                    category, clean_name = evaluate_and_clean_facility(raw_name)
+        addr_parts = [
+            tags.get("addr:street"),
+            tags.get("addr:suburb"),
+            tags.get("addr:city") or tags.get("addr:district"),
+            tags.get("addr:state"),
+            tags.get("addr:postcode"),
+        ]
+        address = ", ".join([p for p in addr_parts if p]) or tags.get("addr:full", "India")
 
-                    if category is None:
-                        dropped_entries += 1
-                        continue
+        verified_facilities[osm_id] = {
+            "place_id": f"osm_{osm_id}",
+            "name": clean_name,
+            "category": category,
+            "address": address,
+            "latitude": lat,
+            "longitude": lon,
+            "phone": tags.get("phone") or tags.get("contact:phone", ""),
+            "maps_url": f"https://www.google.com/maps/search/?api=1&query={lat},{lon}" if lat and lon else "",
+            "source": "openstreetmap_overpass_free",
+        }
 
-                    verified_facilities[place_id] = {
-                        "place_id": place_id,
-                        "name": clean_name,
-                        "category": category,
-                        "address": place.get("formattedAddress", ""),
-                        "latitude": place.get("location", {}).get("latitude"),
-                        "longitude": place.get("location", {}).get("longitude"),
-                        "phone": place.get("nationalPhoneNumber") or place.get("internationalPhoneNumber", ""),
-                        "maps_url": place.get("googleMapsUri", ""),
-                        "source": "google_places_api_filtered",
-                    }
-
-                time.sleep(0.2)
-            except Exception as e:
-                print(f"  [X] Error on query '{query}': {e}")
-
-    # Overwrite esi_master.json directly in your repository
-    output_filename = "esi_master.json"
+    output_file = "esi_master.json"
     result_list = list(verified_facilities.values())
 
-    with open(output_filename, "w", encoding="utf-8") as f:
+    with open(output_file, "w", encoding="utf-8") as f:
         json.dump(result_list, f, indent=2, ensure_ascii=False)
 
-    print(f"\nCompleted successfully.")
-    print(f"Excluded non-clinical entities: {dropped_entries}")
-    print(f"Saved {len(result_list)} verified clinical facilities into '{output_filename}'.")
+    print(f"\nExtraction complete.")
+    print(f"Non-clinical excluded: {dropped_count}")
+    print(f"Saved {len(result_list)} verified facilities directly to '{output_file}'.")
 
 if __name__ == "__main__":
-    run_extraction()
-EOF
+    run_osm_extraction()
+        
