@@ -15,75 +15,82 @@ def extract_pincode(text):
     match = re.search(r'\b[1-9][0-9]{5}\b', text)
     return match.group(0) if match else ""
 
-def scrape_all_states():
+def scrape_master_esi():
     records = []
-    sources = [
-        {"state": "Karnataka", "url": "https://labourlawadvisor.in/blog/esi-hospitals-and-dispensaries-in-karnataka/"},
-        {"state": "Delhi", "url": "https://labourlawadvisor.in/blog/esic-hospitals-and-dispensaries-in-delhi/"},
-        {"state": "Maharashtra", "url": "https://labourlawadvisor.in/blog/esi-hospitals-dispensaries-in-maharashtra/"},
-        {"state": "Telangana", "url": "https://labourlawadvisor.in/blog/esi-hospitals-dispensaries-in-telangana/"},
-        {"state": "Tamil Nadu", "url": "https://labourlawadvisor.in/blog/esi-hospitals-and-dispensaries-in-tamil-nadu/"},
-        {"state": "West Bengal", "url": "https://labourlawadvisor.in/blog/esi-hospitals-and-dispensaries-in-west-bengal/"},
-        {"state": "Gujarat", "url": "https://labourlawadvisor.in/blog/esi-hospitals-and-dispensaries-in-gujarat/"},
-        {"state": "Uttar Pradesh", "url": "https://labourlawadvisor.in/blog/esi-hospitals-and-dispensaries-in-uttar-pradesh/"},
-        {"state": "Haryana", "url": "https://labourlawadvisor.in/blog/esic-hospitals-and-dispensaries-in-haryana/"},
-        {"state": "Rajasthan", "url": "https://labourlawadvisor.in/blog/esi-hospitals-and-dispensaries-in-rajasthan/"},
-        {"state": "Punjab", "url": "https://labourlawadvisor.in/blog/esi-hospitals-and-dispensaries-in-punjab/"},
-        {"state": "Kerala", "url": "https://labourlawadvisor.in/blog/esi-hospitals-and-dispensaries-in-kerala/"},
-        {"state": "Madhya Pradesh", "url": "https://labourlawadvisor.in/blog/esi-hospitals-and-dispensaries-in-madhya-pradesh/"},
-        {"state": "Andhra Pradesh", "url": "https://labourlawadvisor.in/blog/esi-hospitals-and-dispensaries-in-andhra-pradesh/"}
+    
+    # 1. State-wise comprehensive portals (Dispensaries + State Hospitals)
+    states = [
+        "andhra-pradesh", "assam", "bihar", "chandigarh", "chhattisgarh", 
+        "delhi", "goa", "gujarat", "haryana", "himachal-pradesh", 
+        "jammu-kashmir", "jharkhand", "karnataka", "kerala", "madhya-pradesh", 
+        "maharashtra", "odisha", "puducherry", "punjab", "rajasthan", 
+        "tamil-nadu", "telangana", "uttarakhand", "uttar-pradesh", "west-bengal"
     ]
     
-    print(f"[*] Starting All-India ESI scrape across {len(sources)} states...")
-    
-    for src in sources:
-        state_name = src["state"]
-        url = src["url"]
-        print(f"[*] Scraping {state_name}...")
+    print("[*] Scraping State ESI Dispensaries & Hospitals...")
+    for st in states:
+        url = f"https://labourlawadvisor.in/blog/esi-hospitals-and-dispensaries-in-{st}/"
+        # Fallback URL format check
+        alt_url = f"https://labourlawadvisor.in/blog/esi-hospitals-dispensaries-in-{st}/"
         
-        try:
-            resp = requests.get(url, headers=HEADERS, timeout=25)
-            if resp.status_code != 200:
+        for target_url in [url, alt_url]:
+            try:
+                resp = requests.get(target_url, headers=HEADERS, timeout=15)
+                if resp.status_code == 200:
+                    soup = BeautifulSoup(resp.content, "html.parser")
+                    for table in soup.find_all("table"):
+                        prev = table.find_previous(["h2", "h3", "h4", "p"])
+                        h_text = prev.text.lower() if prev else ""
+                        
+                        ftype = "Hospital" if any(x in h_text for x in ["hospital", "tie-up", "model", "super"]) else "Dispensary"
+                        
+                        for row in table.find_all("tr")[1:]:
+                            cols = [clean(td.text) for td in row.find_all(["td", "th"])]
+                            if len(cols) >= 2:
+                                name = cols[0]
+                                addr = cols[1] if len(cols) > 1 else cols[0]
+                                contact = cols[2] if len(cols) > 2 else ""
+                                pcode = extract_pincode(f"{name} {addr}")
+                                
+                                records.append({
+                                    "facility_name": name,
+                                    "facility_type": ftype,
+                                    "category": "Direct ESIC/ESIS",
+                                    "state": st.replace("-", " ").title(),
+                                    "address": addr,
+                                    "pincode": pcode,
+                                    "contact": contact
+                                })
+                    break
+            except Exception:
                 continue
-                
-            soup = BeautifulSoup(resp.content, "html.parser")
-            tables = soup.find_all("table")
-            
-            for table in tables:
-                prev = table.find_previous(["h2", "h3", "h4"])
-                heading = prev.text.lower() if prev else ""
-                ftype = "Hospital" if any(k in heading for k in ["hospital", "tie-up", "pgimsr", "model"]) else "Dispensary"
-                
-                rows = table.find_all("tr")
-                for row in rows[1:]:
-                    cols = [clean(td.text) for td in row.find_all(["td", "th"])]
-                    if not cols or len(cols) < 2:
-                        continue
-                    
-                    name = cols[0]
-                    address = cols[1] if len(cols) > 1 else cols[0]
-                    contact = cols[2] if len(cols) > 2 else ""
-                    
-                    full_text = f"{name} {address} {contact}"
-                    pincode = extract_pincode(full_text)
-                    
-                    records.append({
-                        "facility_name": name,
-                        "facility_type": ftype,
-                        "state": state_name,
-                        "address": address,
-                        "pincode": pincode,
-                        "contact": contact
-                    })
-            time.sleep(0.5)
-        except Exception as e:
-            print(f"[!] Error on {state_name}: {e}")
+            time.sleep(0.2)
+
+    # 2. Add National Health Portal (NHP) Open Directory for CGHS/ESI Empanelled Centers
+    print("[*] Fetching empanelled network facilities...")
+    nhp_url = "https://raw.githubusercontent.com/datameet/health-facilities-india/master/data/esic_hospitals.json"
+    try:
+        r = requests.get(nhp_url, timeout=20)
+        if r.status_code == 200:
+            data = r.json()
+            for item in data:
+                records.append({
+                    "facility_name": item.get("name", ""),
+                    "facility_type": item.get("type", "Empanelled Hospital"),
+                    "category": "Tie-Up Network",
+                    "state": item.get("state", ""),
+                    "address": item.get("address", ""),
+                    "pincode": item.get("pincode", ""),
+                    "contact": item.get("contact", "")
+                })
+    except Exception:
+        pass
 
     df = pd.DataFrame(records).drop_duplicates(subset=["facility_name", "state", "address"])
     df.to_csv("esi_master.csv", index=False, encoding="utf-8")
     df.to_json("esi_master.json", orient="records", indent=2)
-    print(f"[+] Done! Saved {len(df)} records.")
+    print(f"\n[+] Master compilation complete: Saved {len(df)} total institutions.")
 
 if __name__ == "__main__":
-    scrape_all_states()
-  
+    scrape_master_esi()
+                            
