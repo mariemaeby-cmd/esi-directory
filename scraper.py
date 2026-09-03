@@ -1,3 +1,4 @@
+cat << 'EOF' > scraper.py
 import json
 import os
 import re
@@ -66,17 +67,13 @@ COMPILED_EXCLUSIONS = [re.compile(p, re.IGNORECASE) for p in EXCLUSION_PATTERNS]
 
 def evaluate_and_clean_facility(name: str) -> Tuple[Optional[str], str]:
     clean_name = name.strip()
-    
-    # 1. Reject non-clinical keywords
     for exclusion in COMPILED_EXCLUSIONS:
         if exclusion.search(clean_name):
             return None, clean_name
 
-    # 2. Require positive clinical match
     if not any(pattern.search(clean_name) for pattern in COMPILED_CLINICAL):
         return None, clean_name
 
-    # 3. Expand DCBO
     clean_name = re.sub(
         r"\b(dcbo|d\.c\.b\.o)\b",
         "Dispensary-cum-Branch Office (DCBO)",
@@ -84,7 +81,6 @@ def evaluate_and_clean_facility(name: str) -> Tuple[Optional[str], str]:
         flags=re.IGNORECASE
     )
 
-    # 4. Categorize Tier
     name_lower = clean_name.lower()
     if any(k in name_lower for k in ["medical college", "pgimsr", "dental college"]):
         category = "Tier 1: ESIC Medical College / PGIMSR"
@@ -102,8 +98,8 @@ def evaluate_and_clean_facility(name: str) -> Tuple[Optional[str], str]:
     return category, clean_name
 
 def run_extraction():
-    if API_KEY == "YOUR_API_KEY_HERE":
-        print("[!] Set your GOOGLE_MAPS_API_KEY environment variable or edit the script with your API key.")
+    if not API_KEY or API_KEY == "YOUR_API_KEY_HERE":
+        print("[!] ERROR: Set GOOGLE_MAPS_API_KEY before running.")
         return
 
     verified_facilities = {}
@@ -155,18 +151,19 @@ def run_extraction():
 
                 time.sleep(0.2)
             except Exception as e:
-                print(f"  [X] Request error on query '{query}': {e}")
+                print(f"  [X] Error on query '{query}': {e}")
 
-    output_filename = "verified_esi_clinical_facilities.json"
+    # Overwrite esi_master.json directly in your repository
+    output_filename = "esi_master.json"
     result_list = list(verified_facilities.values())
 
     with open(output_filename, "w", encoding="utf-8") as f:
         json.dump(result_list, f, indent=2, ensure_ascii=False)
 
-    print(f"\nCompleted.")
-    print(f"Administrative/Quarters excluded: {dropped_entries}")
-    print(f"Saved {len(result_list)} verified clinical facilities to '{output_filename}'.")
+    print(f"\nCompleted successfully.")
+    print(f"Excluded non-clinical entities: {dropped_entries}")
+    print(f"Saved {len(result_list)} verified clinical facilities into '{output_filename}'.")
 
 if __name__ == "__main__":
     run_extraction()
-    
+EOF
