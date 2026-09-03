@@ -1,0 +1,33 @@
+name: Run ESI Scraper
+
+on:
+  workflow_dispatch:
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install requests beautifulsoup4 pandas lxml
+
+      - name: Execute Scraper
+        run: python scraper.py
+
+      - name: Commit and push output datasets
+        run: |
+          git config --global user.name "GitHub Action"
+          git config --global user.email "action@github.com"
+          git add esi_master.csv esi_master.json
+          git commit -m "Update master ESI directory" || exit 0
+          git push
+          
