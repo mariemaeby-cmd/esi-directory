@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ESI Bedside Clinical Directory</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --card-bg: #1e293b;
+      --border: #334155;
+      --text: #f8fafc;
+      --subtext: #94a3b8;
+      --accent: #38bdf8;
+      --t1: #f87171;
+      --t2: #fbbf24;
+      --t3: #34d399;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: system-ui, -apple-system, sans-serif; }
+    body { background-color: var(--bg); color: var(--text); padding: 12px; }
+    header { max-width: 700px; margin: 0 auto 12px; }
+    h1 { font-size: 1.25rem; font-weight: 700; color: #fff; }
+    .subtitle { font-size: 0.8rem; color: var(--subtext); margin-top: 2px; }
+    .search-panel { max-width: 700px; margin: 0 auto 14px; display: flex; flex-direction: column; gap: 8px; }
+    input[type="text"] {
+      width: 100%;
+      padding: 12px 14px;
+      font-size: 1rem;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      outline: none;
+      background: var(--card-bg);
+      color: #fff;
+    }
+    input[type="text"]:focus { border-color: var(--accent); }
+    .meta-bar { display: flex; justify-content: space-between; font-size: 0.78rem; color: var(--subtext); }
+    .card-list { max-width: 700px; margin: 0 auto; display: flex; flex-direction: column; gap: 10px; }
+    .card {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 12px 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .card-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; }
+    .fac-name { font-size: 0.95rem; font-weight: 600; color: #fff; line-height: 1.3; }
+    .badge {
+      font-size: 0.65rem;
+      font-weight: 700;
+      padding: 2px 6px;
+      border-radius: 4px;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+    .badge-t1 { background: rgba(239, 68, 68, 0.2); color: var(--t1); border: 1px solid var(--t1); }
+    .badge-t2 { background: rgba(245, 158, 11, 0.2); color: var(--t2); border: 1px solid var(--t2); }
+    .badge-t3 { background: rgba(16, 185, 129, 0.2); color: var(--t3); border: 1px solid var(--t3); }
+    .fac-address { font-size: 0.8rem; color: var(--subtext); line-height: 1.3; }
+    .card-actions { display: flex; gap: 8px; margin-top: 4px; flex-wrap: wrap; }
+    .action-btn {
+      font-size: 0.75rem;
+      font-weight: 600;
+      padding: 6px 12px;
+      border-radius: 6px;
+      text-decoration: none;
+      border: 1px solid var(--border);
+      color: #fff;
+      background: #334155;
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+    }
+    .action-btn.primary { background: #0284c7; border-color: #0284c7; }
+  </style>
+</head>
+<body>
+
+  <header>
+    <h1>ESI Clinical Referral Directory</h1>
+    <div class="subtitle">Zero-Login Emergency & Referral Facility Finder</div>
+  </header>
+
+  <div class="search-panel">
+    <input type="text" id="queryInput" placeholder="Search by name, city, state, or dispensary..." autocomplete="off">
+    <div class="meta-bar">
+      <span id="counter">Loading directory...</span>
+      <span id="geoStatus">GPS: Offline</span>
+    </div>
+  </div>
+
+  <div class="card-list" id="resultsList"></div>
+
+  <script>
+    let masterData = [];
+    let userLat = null, userLng = null;
+
+    async function init() {
+      try {
+        const res = await fetch('esi_master.json');
+        masterData = await res.json();
+        document.getElementById('counter').innerText = `${masterData.length} verified centers ready`;
+        render(masterData.slice(0, 30));
+        trackLocation();
+      } catch (e) {
+        document.getElementById('counter').innerText = "Failed to load esi_master.json";
+      }
+    }
+
+    function trackLocation() {
+      if ("geolocation" in navigator) {
+        navigator.geolocation.getCurrentPosition(pos => {
+          userLat = pos.coords.latitude;
+          userLng = pos.coords.longitude;
+          document.getElementById('geoStatus').innerText = "GPS: Active";
+          executeSearch();
+        }, () => {
+          document.getElementById('geoStatus').innerText = "GPS: Unavailable";
+        });
+      }
+    }
+
+    function calcDistance(lat1, lon1, lat2, lon2) {
+      if (!lat1 || !lon1 || !lat2 || !lon2) return null;
+      const R = 6371;
+      const dLat = (lat2 - lat1) * Math.PI / 180;
+      const dLon = (lon2 - lon1) * Math.PI / 180;
+      const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
+                Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+                Math.sin(dLon/2) * Math.sin(dLon/2);
+      return (R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a))).toFixed(1);
+    }
+
+    function getBadgeClass(cat) {
+      if (!cat) return "badge-t3";
+      if (cat.includes("Tier 1")) return "badge-t1";
+      if (cat.includes("Tier 2")) return "badge-t2";
+      return "badge-t3";
+    }
+
+    function render(list) {
+      const container = document.getElementById('resultsList');
+      if (!list.length) {
+        container.innerHTML = '<div style="color: var(--subtext); text-align: center; padding: 20px;">No matching facilities found.</div>';
+        return;
+      }
+      container.innerHTML = list.map(item => {
+        const dist = (userLat && userLng) ? calcDistance(userLat, userLng, item.latitude, item.longitude) : null;
+        return `
+          <div class="card">
+            <div class="card-head">
+              <span class="fac-name">${item.name}</span>
+              <span class="badge ${getBadgeClass(item.category)}">${(item.category || "ESI").split(':')[0]}</span>
+            </div>
+            <div class="fac-address">${item.address || 'Address unlisted'}</div>
+            <div class="card-actions">
+              ${dist ? `<span class="action-btn">📍 ${dist} km</span>` : ''}
+              ${item.phone ? `<a href="tel:${item.phone}" class="action-btn">📞 Call</a>` : ''}
+              ${item.maps_url ? `<a href="${item.maps_url}" target="_blank" class="action-btn primary">Maps & Directions</a>` : ''}
+            </div>
+          </div>
+        `;
+      }).join('');
+    }
+
+    function executeSearch() {
+      const q = document.getElementById('queryInput').value.toLowerCase().trim();
+      if (!q) {
+        render(masterData.slice(0, 30));
+        document.getElementById('counter').innerText = `${masterData.length} centers ready`;
+        return;
+      }
+
+      const filtered = masterData.filter(i => 
+        (i.name && i.name.toLowerCase().includes(q)) || 
+        (i.address && i.address.toLowerCase().includes(q))
+      );
+
+      document.getElementById('counter').innerText = `${filtered.length} matches found`;
+      render(filtered.slice(0, 50));
+    }
+
+    document.getElementById('queryInput').addEventListener('input', executeSearch);
+    window.addEventListener('DOMContentLoaded', init);
+  </script>
+</body>
+</html>
